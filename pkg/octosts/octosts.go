@@ -279,6 +279,9 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 		UserAgent: extractUserAgent(ctx),
 	}
 
+	// Export the issued token's hash and trust policy (token_metric.go).
+	defer func() { observeIssuedToken(e, err) }()
+
 	if s.metrics && s.ceclient != nil {
 		defer func() {
 			event := cloudevents.NewEvent()
