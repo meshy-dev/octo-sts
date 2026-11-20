@@ -10,9 +10,11 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -43,6 +45,7 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
+	"github.com/octo-sts/app/internal/logtest"
 	"github.com/octo-sts/app/pkg/ghinstall"
 	"github.com/octo-sts/app/pkg/provider"
 	"github.com/octo-sts/app/pkg/routekey"
@@ -335,6 +338,95 @@ func TestExchange(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestExchangeLogsEvent verifies that every exchange, successful or not, is
+// logged as one structured line with the event's fields, without an event
+// broker configured.
+func TestExchangeLogsEvent(t *testing.T) {
+	atr := newAppsTransport(t, newFakeGitHub())
+
+	pk, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("cannot generate RSA key %v", err)
+	}
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: pk}, nil)
+	if err != nil {
+		t.Fatalf("jose.NewSigner() = %v", err)
+	}
+	iss := "https://token.actions.githubusercontent.com"
+	token, err := josejwt.Signed(signer).Claims(josejwt.Claims{
+		Subject:  "foo",
+		Issuer:   iss,
+		Audience: josejwt.Audience{"octosts"},
+		Expiry:   josejwt.NewNumericDate(time.Now().Add(10 * time.Minute)),
+	}).Serialize()
+	if err != nil {
+		t.Fatalf("CompactSerialize failed: %v", err)
+	}
+	provider.AddTestKeySetVerifier(t, iss, &oidc.StaticKeySet{
+		PublicKeys: []crypto.PublicKey{pk.Public()},
+	})
+
+	pool := &ghinstall.OrgPool{M: &fakeInstallMgr{atr: atr}, AppCount: 1}
+	sts := &sts{router: ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{"org": pool})}
+
+	t.Run("success", func(t *testing.T) {
+		ctx, logs := logtest.Capture(t)
+		ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
+		tok, err := sts.Exchange(ctx, &v1.ExchangeRequest{Identity: "foo", Scopes: []string{"org/repo"}})
+		if err != nil {
+			t.Fatalf("Exchange failed: %v", err)
+		}
+		sum := sha256.Sum256([]byte(tok.Token))
+		line := exchangeLine(t, logs.String())
+		for _, want := range []string{
+			"scope=org/repo",
+			"identity=foo",
+			"issuer=" + iss,
+			"subject=foo",
+			"token_sha256=" + hex.EncodeToString(sum[:]),
+		} {
+			if !strings.Contains(line, want) {
+				t.Errorf("exchange log line missing %q: %s", want, line)
+			}
+		}
+		if strings.Contains(line, "error=") {
+			t.Errorf("successful exchange logged an error: %s", line)
+		}
+		if strings.Contains(line, tok.Token) {
+			t.Errorf("exchange log line contains the token itself: %s", line)
+		}
+	})
+
+	t.Run("failure", func(t *testing.T) {
+		ctx, logs := logtest.Capture(t)
+		_, err := sts.Exchange(ctx, &v1.ExchangeRequest{Identity: "foo", Scopes: []string{"org/repo"}})
+		if err == nil {
+			t.Fatal("Exchange without a bearer token succeeded")
+		}
+		line := exchangeLine(t, logs.String())
+		for _, want := range []string{"identity=foo", "scope=org/repo", "token_sha256=\"\"", "error="} {
+			if !strings.Contains(line, want) {
+				t.Errorf("exchange log line missing %q: %s", want, line)
+			}
+		}
+	})
+}
+
+// exchangeLine returns the single `msg=exchange` line in logs.
+func exchangeLine(t *testing.T, logs string) string {
+	t.Helper()
+	var found []string
+	for _, l := range strings.Split(logs, "\n") {
+		if strings.Contains(l, "msg=exchange ") {
+			found = append(found, l)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("want 1 exchange log line, got %d:\n%s", len(found), logs)
+	}
+	return found[0]
 }
 
 // TestExchangeMismatchDoesNotLeakPolicy verifies that a caller whose token does

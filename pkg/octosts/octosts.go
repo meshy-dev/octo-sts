@@ -279,6 +279,17 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 		UserAgent: extractUserAgent(ctx),
 	}
 
+	// Record every exchange as one structured log line and in the exchange
+	// metrics (exchange_observe.go), whether or not an event broker is
+	// configured. Registered before the event's defer so it runs after it,
+	// with e.Error set.
+	defer func() {
+		if err != nil && e.Error == "" {
+			e.Error = err.Error()
+		}
+		observeExchange(ctx, e, err)
+	}()
+
 	if s.metrics && s.ceclient != nil {
 		defer func() {
 			event := cloudevents.NewEvent()
