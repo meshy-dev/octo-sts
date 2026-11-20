@@ -1,0 +1,58 @@
+# Meshy's build of octo-sts (meshy-dev/octo-sts, a fork of octo-sts/app).
+# Builds cmd/app and pushes it to ghcr.io/meshy-dev/octo-sts. Deployed from
+# taichi-dev/deployments k8s/apps/octo-sts/values.yaml, pinned by digest.
+# Only GitHub-owned actions: the org allows GitHub-owned and verified actions.
+name: Meshy image
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: meshy-image-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  KO_VERSION: v0.19.1
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # clone the repository
+      packages: write # push the image to GHCR
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Test the packages this fork changes
+        run: go test ./pkg/octosts/...
+
+      - name: Install ko
+        run: go install "github.com/google/ko@${KO_VERSION}"
+
+      - name: Build (pull request)
+        if: github.event_name == 'pull_request'
+        run: ko build --local ./cmd/app
+
+      - name: Build and push
+        if: github.event_name != 'pull_request'
+        env:
+          KO_DOCKER_REPO: ghcr.io/${{ github.repository_owner }}/octo-sts
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+          SHA: ${{ github.sha }}
+        run: |
+          printf '%s' "$GH_TOKEN" | ko login ghcr.io --username "$ACTOR" --password-stdin
+          ko build --bare --tags="sha-${SHA::12},latest" --image-refs=image.ref ./cmd/app
+          echo "Image: \`$(cat image.ref)\`" >> "$GITHUB_STEP_SUMMARY"
