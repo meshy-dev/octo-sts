@@ -1,3 +1,6 @@
+# Copyright 2026 Chainguard, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 # Meshy's build of octo-sts (meshy-dev/octo-sts, a fork of octo-sts/app).
 # Builds cmd/app and pushes it to ghcr.io/meshy-dev/octo-sts. Deployed from
 # taichi-dev/deployments k8s/apps/octo-sts/values.yaml, pinned by digest.
