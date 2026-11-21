@@ -64,7 +64,7 @@ const (
 // GitHub installation tokens. router selects the per-org app pool; sticky (may
 // be nil) persists checks:write routing for check-run ownership across all
 // pools (installation IDs are globally unique within GitHub).
-func NewSecurityTokenServiceServer(router *ghinstall.OrgRouter, sticky stickystore.Store, apps AppSet, ceclient cloudevents.Client, domain string, metrics bool, baseURL string, orgPolicyRepo string, policyDir string, allowedIssuers []string, requireAppPin bool) pboidc.SecurityTokenServiceServer {
+func NewSecurityTokenServiceServer(router *ghinstall.OrgRouter, sticky stickystore.Store, apps AppSet, ceclient cloudevents.Client, domain string, metrics bool, baseURL string, orgPolicyRepo string, policyDir string, allowedIssuers []string, requireAppPin bool, orgPolicyOnly bool) pboidc.SecurityTokenServiceServer {
 	return &sts{
 		router:         router,
 		sticky:         sticky,
@@ -77,6 +77,7 @@ func NewSecurityTokenServiceServer(router *ghinstall.OrgRouter, sticky stickysto
 		policyDir:      policyDir,
 		allowedIssuers: allowedIssuers,
 		requireAppPin:  requireAppPin,
+		orgPolicyOnly:  orgPolicyOnly,
 	}
 }
 
@@ -191,6 +192,11 @@ type sts struct {
 
 	// requireAppPin rejects trust policies without app or app_pattern.
 	requireAppPin bool
+
+	// orgPolicyOnly, when true, refuses any repo-scoped exchange so trust
+	// policies are honored only from the org policy repo. Empty (false) serves
+	// repo-scoped exchanges, preserving the default behavior.
+	orgPolicyOnly bool
 
 	// orgIssuerFlight collapses concurrent org-allowlist lookups for the same
 	// owner into one enumeration. Its zero value is ready to use.
@@ -359,6 +365,15 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	// Request validation.
 	if requestScope == "" {
 		return nil, status.Error(codes.InvalidArgument, "scope must be provided")
+	}
+	// In org-policy-only mode, refuse any repo-scoped exchange (scope
+	// "owner/repo") before any policy read or token mint. Only a bare-org scope
+	// ("owner") is served, so trust policies are honored solely from the org
+	// policy repo and a writer to another repository's default branch cannot
+	// inject a policy. path.Dir reports "." for a bare org, matching the
+	// scopedToRepo test in lookupInstallAndTrustPolicy.
+	if s.orgPolicyOnly && path.Dir(requestScope) != "." {
+		return nil, status.Error(codes.PermissionDenied, "repo-scoped exchanges are disabled; policies are read only from the org policy repo")
 	}
 	if request.GetIdentity() == "" {
 		return nil, status.Error(codes.InvalidArgument, "identity must be provided")
